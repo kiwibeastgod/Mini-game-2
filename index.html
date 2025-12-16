@@ -291,8 +291,12 @@
     shootAcc += dt * player.fireRate;
     while (shootAcc >= 1){
       shootAcc -= 1;
-      const dx = pointer.x - cam.x;
-      const dy = pointer.y - cam.y;
+      const px = player.x + cam.x;
+const py = player.y + cam.y;
+
+const dx = pointer.x - px;
+const dy = pointer.y - py;
+
       const len = Math.hypot(dx,dy) || 1;
       const ux = dx/len, uy = dy/len;
       bullets.push({
