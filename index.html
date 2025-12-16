@@ -1,0 +1,777 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Roguelite</title>
+  <style>
+    :root { --bg:#0b0d12; --fg:#e9ecf1; --mut:#9aa3b2; }
+    html,body { height:100%; margin:0; background:var(--bg); color:var(--fg); font-family:system-ui,Segoe UI,Arial; }
+    .wrap { display:grid; place-items:center; min-height:100%; padding:14px; }
+    .card { width:min(980px, 96vw); }
+    canvas { width:100%; height:auto; background:#0f1320; border:1px solid #25304a; border-radius:14px; display:block; }
+    .bar { display:flex; justify-content:space-between; align-items:center; gap:12px; margin:10px 2px 0; flex-wrap:wrap; }
+    .pill { border:1px solid #25304a; border-radius:999px; padding:6px 10px; color:var(--mut); }
+    .btn { border:1px solid #25304a; border-radius:12px; padding:8px 12px; background:#10162a; color:var(--fg); cursor:pointer; }
+    .btn:active { transform: translateY(1px); }
+    .hint { color:var(--mut); font-size:13px; margin-top:8px; line-height:1.35; }
+    a { color:#9ad; }
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <div class="card">
+    <canvas id="c" width="960" height="540"></canvas>
+    <div class="bar">
+      <div class="pill" id="stats">Loading…</div>
+      <div style="display:flex; gap:10px; align-items:center;">
+        <button class="btn" id="restart">Restart</button>
+        <span class="pill">Move: WASD/Arrows • Dash: Shift • Shoot: Click/Touch (hold)</span>
+      </div>
+    </div>
+    <div class="hint">
+      Tip: clear rooms for XP and upgrades. GitHub Pages friendly (single file). Want bosses, items, shops, saves? tell me what style.
+    </div>
+  </div>
+</div>
+
+<script>
+(() => {
+  // ===== Canvas setup =====
+  const canvas = document.getElementById("c");
+  const ctx = canvas.getContext("2d");
+  const W = canvas.width, H = canvas.height;
+  const statsEl = document.getElementById("stats");
+  const restartBtn = document.getElementById("restart");
+
+  // ===== Input =====
+  const keys = new Set();
+  window.addEventListener("keydown", (e) => {
+    const k = e.key.toLowerCase();
+    if (["arrowup","arrowdown","arrowleft","arrowright","w","a","s","d","shift"," "].includes(k)) e.preventDefault();
+    keys.add(k);
+  }, { passive:false });
+  window.addEventListener("keyup", (e) => keys.delete(e.key.toLowerCase()));
+
+  const pointer = { down:false, x:W/2, y:H/2 };
+  function setPointerFromEvent(e){
+    const r = canvas.getBoundingClientRect();
+    const x = (("clientX" in e) ? e.clientX : e.touches[0].clientX) - r.left;
+    const y = (("clientY" in e) ? e.clientY : e.touches[0].clientY) - r.top;
+    pointer.x = x * (W / r.width);
+    pointer.y = y * (H / r.height);
+  }
+  canvas.addEventListener("mousedown", (e)=>{ pointer.down=true; setPointerFromEvent(e); });
+  window.addEventListener("mouseup", ()=> pointer.down=false);
+  canvas.addEventListener("mousemove", (e)=> setPointerFromEvent(e));
+  canvas.addEventListener("touchstart", (e)=>{ pointer.down=true; setPointerFromEvent(e); }, {passive:false});
+  canvas.addEventListener("touchmove", (e)=>{ setPointerFromEvent(e); }, {passive:false});
+  window.addEventListener("touchend", ()=> pointer.down=false);
+
+  // ===== Helpers =====
+  const clamp = (v,a,b)=> Math.max(a, Math.min(b, v));
+  const rand = (a,b)=> Math.random()*(b-a)+a;
+  const randi = (a,b)=> Math.floor(rand(a,b));
+  const dist2 = (ax,ay,bx,by)=> (ax-bx)*(ax-bx)+(ay-by)*(ay-by);
+  const lerp = (a,b,t)=> a+(b-a)*t;
+
+  // ===== World (tile map) =====
+  const TILE = 18;
+  const GW = Math.floor(W / TILE);
+  const GH = Math.floor(H / TILE);
+
+  // 0 = wall, 1 = floor
+  let grid, rooms, discovered, currentRoomIdx;
+
+  function carveRect(x,y,w,h){
+    for (let j=y; j<y+h; j++){
+      for (let i=x; i<x+w; i++){
+        if (i>=0 && j>=0 && i<GW && j<GH) grid[j][i] = 1;
+      }
+    }
+  }
+  function carveCorridor(x0,y0,x1,y1){
+    let x=x0, y=y0;
+    while (x !== x1){
+      grid[y][x] = 1;
+      x += (x1>x) ? 1 : -1;
+    }
+    while (y !== y1){
+      grid[y][x] = 1;
+      y += (y1>y) ? 1 : -1;
+    }
+    grid[y][x]=1;
+  }
+
+  function genDungeon(){
+    grid = Array.from({length:GH}, ()=> Array.from({length:GW}, ()=>0));
+    rooms = [];
+    discovered = new Set();
+    currentRoomIdx = 0;
+
+    // place rooms
+    const attempts = 220;
+    for (let t=0; t<attempts; t++){
+      const w = randi(6, 13);
+      const h = randi(6, 11);
+      const x = randi(1, GW-w-1);
+      const y = randi(1, GH-h-1);
+      const rect = {x,y,w,h, cx: x + (w>>1), cy: y + (h>>1)};
+      let ok = true;
+      for (const r of rooms){
+        const pad = 1;
+        if (!(rect.x+rect.w+pad < r.x || rect.x-pad > r.x+r.w || rect.y+rect.h+pad < r.y || rect.y-pad > r.y+r.h)){
+          ok = false; break;
+        }
+      }
+      if (ok){
+        rooms.push(rect);
+        carveRect(x,y,w,h);
+      }
+      if (rooms.length >= 16) break;
+    }
+
+    // connect rooms (simple MST-ish by nearest)
+    rooms.sort((a,b)=> a.cx-b.cx);
+    for (let i=1;i<rooms.length;i++){
+      const a = rooms[i-1], b = rooms[i];
+      carveCorridor(a.cx,a.cy,b.cx,b.cy);
+    }
+    // extra connections
+    for (let k=0;k<4;k++){
+      const a = rooms[randi(0,rooms.length)];
+      const b = rooms[randi(0,rooms.length)];
+      if (a && b) carveCorridor(a.cx,a.cy,b.cx,b.cy);
+    }
+  }
+
+  function tileAtWorld(x,y){
+    const i = Math.floor(x / TILE);
+    const j = Math.floor(y / TILE);
+    if (i<0||j<0||i>=GW||j>=GH) return 0;
+    return grid[j][i];
+  }
+  function isWallAt(x,y){ return tileAtWorld(x,y) === 0; }
+
+  // ===== Entities =====
+  const player = {
+    x: W/2, y: H/2, r: 10,
+    vx: 0, vy: 0,
+    speed: 220,
+    hp: 100, hpMax: 100,
+    invuln: 0,
+    dashCD: 0,
+    dashTime: 0,
+    level: 1,
+    xp: 0,
+    xpNeed: 45,
+    dmg: 14,
+    fireRate: 7.5, // bullets/sec
+    bulletSpeed: 520,
+    pierce: 0,
+    lifesteal: 0,
+  };
+
+  let bullets = [];
+  let enemies = [];
+  let particles = [];
+  let score = 0;
+  let running = true;
+  let choosingUpgrade = false;
+
+  function spawnPlayerAtRoom(idx){
+    const r = rooms[idx] ?? rooms[0];
+    player.x = (r.cx + 0.5) * TILE;
+    player.y = (r.cy + 0.5) * TILE;
+    player.vx = player.vy = 0;
+  }
+
+  function roomIndexAt(x,y){
+    const tx = Math.floor(x / TILE);
+    const ty = Math.floor(y / TILE);
+    for (let i=0;i<rooms.length;i++){
+      const r = rooms[i];
+      if (tx>=r.x && tx<r.x+r.w && ty>=r.y && ty<r.y+r.h) return i;
+    }
+    return -1;
+  }
+
+  function ensureRoomEnemies(idx){
+    // spawn enemies once per room
+    if (idx < 0) return;
+    if (discovered.has("spawned:"+idx)) return;
+    discovered.add("spawned:"+idx);
+
+    const r = rooms[idx];
+    const count = clamp(Math.floor(2 + idx*0.6 + player.level*0.35), 2, 10);
+    for (let n=0;n<count;n++){
+      const ex = (r.x + 1 + Math.random()*(r.w-2)) * TILE + TILE*0.5;
+      const ey = (r.y + 1 + Math.random()*(r.h-2)) * TILE + TILE*0.5;
+      enemies.push({
+        x: ex, y: ey,
+        r: rand(10, 15),
+        hp: 28 + idx*7 + player.level*4,
+        spd: 90 + idx*4,
+        dmg: 14,
+        touchCD: 0,
+      });
+    }
+  }
+
+  function addXP(amount){
+    player.xp += amount;
+    while (player.xp >= player.xpNeed){
+      player.xp -= player.xpNeed;
+      player.level += 1;
+      player.xpNeed = Math.floor(player.xpNeed * 1.22 + 14);
+      choosingUpgrade = true;
+      running = false;
+    }
+  }
+
+  // ===== Upgrades =====
+  const upgradePool = [
+    { key:"dmg",      name:"+Damage",      desc:"+20% bullet damage", apply:()=> player.dmg = Math.round(player.dmg*1.2) },
+    { key:"firerate", name:"+Fire Rate",   desc:"+18% fire rate", apply:()=> player.fireRate *= 1.18 },
+    { key:"hp",       name:"+Max HP",      desc:"+20 max hp (heal 20)", apply:()=> { player.hpMax += 20; player.hp = Math.min(player.hpMax, player.hp+20);} },
+    { key:"speed",    name:"+Move Speed",  desc:"+12% move speed", apply:()=> player.speed *= 1.12 },
+    { key:"bulletspd",name:"+Bullet Speed",desc:"+15% bullet speed", apply:()=> player.bulletSpeed *= 1.15 },
+    { key:"pierce",   name:"Piercing",     desc:"+1 pierce (hit extra enemy)", apply:()=> player.pierce += 1 },
+    { key:"lifesteal",name:"Lifesteal",    desc:"Heal 8% of damage dealt", apply:()=> player.lifesteal = Math.min(0.22, player.lifesteal + 0.08) },
+    { key:"dash",     name:"+Dash",        desc:"-20% dash cooldown", apply:()=> player.dashCDMax = (player.dashCDMax ?? 1.15) * 0.80 },
+  ];
+
+  function pickUpgrades(){
+    // pick 3 random unique
+    const picks = [];
+    const used = new Set();
+    while (picks.length < 3){
+      const u = upgradePool[randi(0, upgradePool.length)];
+      if (!used.has(u.key)){
+        used.add(u.key);
+        picks.push(u);
+      }
+    }
+    return picks;
+  }
+
+  let upgradeChoices = pickUpgrades();
+
+  function chooseUpgrade(i){
+    const u = upgradeChoices[i];
+    if (!u) return;
+    u.apply();
+    upgradeChoices = pickUpgrades();
+    choosingUpgrade = false;
+    running = true;
+  }
+
+  // ===== Collision against walls =====
+  function pushOutOfWalls(ent){
+    // sample a few directions and nudge out
+    const steps = 6;
+    for (let s=0; s<steps; s++){
+      const angles = [0, Math.PI/2, Math.PI, -Math.PI/2, Math.PI/4, -Math.PI/4];
+      for (const a of angles){
+        const px = ent.x + Math.cos(a) * ent.r;
+        const py = ent.y + Math.sin(a) * ent.r;
+        if (isWallAt(px,py)){
+          ent.x -= Math.cos(a) * 2;
+          ent.y -= Math.sin(a) * 2;
+        }
+      }
+    }
+  }
+
+  // ===== Combat =====
+  let shootAcc = 0;
+  function shoot(dt){
+    // hold-to-shoot
+    if (!pointer.down) return;
+    shootAcc += dt * player.fireRate;
+    while (shootAcc >= 1){
+      shootAcc -= 1;
+      const dx = pointer.x - cam.x;
+      const dy = pointer.y - cam.y;
+      const len = Math.hypot(dx,dy) || 1;
+      const ux = dx/len, uy = dy/len;
+      bullets.push({
+        x: player.x, y: player.y,
+        vx: ux * player.bulletSpeed,
+        vy: uy * player.bulletSpeed,
+        r: 4,
+        dmg: player.dmg,
+        pierce: player.pierce,
+        life: 1.2,
+      });
+      // tiny kick particles
+      particles.push({x:player.x-ux*10,y:player.y-uy*10,vx:-ux*40,vy:-uy*40,life:0.25});
+    }
+  }
+
+  function damagePlayer(amount){
+    if (player.invuln > 0) return;
+    player.hp -= amount;
+    player.invuln = 0.6;
+    if (player.hp <= 0){
+      player.hp = 0;
+      running = false;
+      gameOver = true;
+    }
+  }
+
+  function healPlayer(amount){
+    player.hp = Math.min(player.hpMax, player.hp + amount);
+  }
+
+  // ===== Camera (world-to-screen) =====
+  const cam = { x: W/2, y: H/2 };
+  function updateCamera(){
+    // center player on screen with smoothing
+    const targetX = W/2 - player.x;
+    const targetY = H/2 - player.y;
+    cam.x = lerp(cam.x, targetX, 0.14);
+    cam.y = lerp(cam.y, targetY, 0.14);
+  }
+
+  // ===== Minimap =====
+  function drawMinimap(){
+    const mw = 170, mh = 110;
+    const x0 = W - mw - 14, y0 = 14;
+    ctx.save();
+    ctx.globalAlpha = 0.92;
+    ctx.fillStyle = "rgba(10,12,18,0.85)";
+    ctx.strokeStyle = "rgba(70,90,140,0.65)";
+    roundRect(x0, y0, mw, mh, 10, true, true);
+
+    // scale tiles to minimap pixels
+    const sx = mw / GW;
+    const sy = mh / GH;
+
+    // discover rooms as visited
+    const ridx = roomIndexAt(player.x, player.y);
+    if (ridx >= 0) discovered.add("room:"+ridx);
+
+    // draw floors for discovered rooms only
+    for (let i=0;i<rooms.length;i++){
+      if (!discovered.has("room:"+i)) continue;
+      const r = rooms[i];
+      ctx.fillStyle = "rgba(160,180,230,0.08)";
+      ctx.fillRect(x0 + r.x*sx, y0 + r.y*sy, r.w*sx, r.h*sy);
+      ctx.strokeStyle = "rgba(160,180,230,0.18)";
+      ctx.strokeRect(x0 + r.x*sx, y0 + r.y*sy, r.w*sx, r.h*sy);
+    }
+
+    // player dot
+    ctx.fillStyle = "#e9ecf1";
+    ctx.beginPath();
+    ctx.arc(x0 + (player.x/TILE)*sx, y0 + (player.y/TILE)*sy, 3, 0, Math.PI*2);
+    ctx.fill();
+
+    // enemies in current room
+    ctx.fillStyle = "rgba(255,120,120,0.85)";
+    for (const e of enemies){
+      if (roomIndexAt(e.x,e.y) !== ridx) continue;
+      ctx.fillRect(x0 + (e.x/TILE)*sx - 1.5, y0 + (e.y/TILE)*sy - 1.5, 3, 3);
+    }
+
+    ctx.restore();
+  }
+
+  // ===== Drawing helpers =====
+  function roundRect(x,y,w,h,r,fill,stroke){
+    ctx.beginPath();
+    ctx.moveTo(x+r,y);
+    ctx.arcTo(x+w,y,x+w,y+h,r);
+    ctx.arcTo(x+w,y+h,x,y+h,r);
+    ctx.arcTo(x,y+h,x,y,r);
+    ctx.arcTo(x,y,x+w,y,r);
+    if (fill) ctx.fill();
+    if (stroke) ctx.stroke();
+  }
+
+  function drawDungeon(){
+    // draw tiles in view
+    const pad = 2;
+    const minI = clamp(Math.floor((-cam.x)/TILE)-pad, 0, GW-1);
+    const maxI = clamp(Math.floor((-cam.x + W)/TILE)+pad, 0, GW-1);
+    const minJ = clamp(Math.floor((-cam.y)/TILE)-pad, 0, GH-1);
+    const maxJ = clamp(Math.floor((-cam.y + H)/TILE)+pad, 0, GH-1);
+
+    for (let j=minJ; j<=maxJ; j++){
+      for (let i=minI; i<=maxI; i++){
+        const t = grid[j][i];
+        const x = i*TILE + cam.x;
+        const y = j*TILE + cam.y;
+        if (t === 0){
+          ctx.fillStyle = "#0a0f1f";
+          ctx.fillRect(x,y,TILE,TILE);
+          // subtle dots
+          ctx.fillStyle = "rgba(255,255,255,0.02)";
+          ctx.fillRect(x+TILE*0.2,y+TILE*0.2,2,2);
+        } else {
+          ctx.fillStyle = "#121a33";
+          ctx.fillRect(x,y,TILE,TILE);
+          ctx.fillStyle = "rgba(255,255,255,0.035)";
+          ctx.fillRect(x+1,y+1,TILE-2,TILE-2);
+        }
+      }
+    }
+
+    // room border highlight
+    const ridx = roomIndexAt(player.x, player.y);
+    if (ridx >= 0){
+      const r = rooms[ridx];
+      ctx.strokeStyle = "rgba(120,170,255,0.18)";
+      ctx.lineWidth = 2;
+      ctx.strokeRect(r.x*TILE+cam.x, r.y*TILE+cam.y, r.w*TILE, r.h*TILE);
+      ctx.lineWidth = 1;
+    }
+  }
+
+  function drawEntityCircle(x,y,r,fill,stroke){
+    ctx.fillStyle = fill;
+    ctx.beginPath();
+    ctx.arc(x+cam.x, y+cam.y, r, 0, Math.PI*2);
+    ctx.fill();
+    if (stroke){
+      ctx.strokeStyle = stroke;
+      ctx.stroke();
+    }
+  }
+
+  function drawUI(){
+    // HP bar
+    const bx=14, by=H-24, bw=260, bh=10;
+    ctx.fillStyle = "rgba(0,0,0,0.35)";
+    roundRect(bx,by,bw,bh,6,true,false);
+    ctx.fillStyle = "rgba(120,255,180,0.95)";
+    roundRect(bx,by,bw*(player.hp/player.hpMax),bh,6,true,false);
+
+    // XP bar
+    const x2=14, y2=H-40, w2=260, h2=8;
+    ctx.fillStyle = "rgba(0,0,0,0.35)";
+    roundRect(x2,y2,w2,h2,6,true,false);
+    ctx.fillStyle = "rgba(120,170,255,0.95)";
+    roundRect(x2,y2,w2*(player.xp/player.xpNeed),h2,6,true,false);
+
+    drawMinimap();
+
+    if (gameOver){
+      overlay("Game Over", "Press Restart (or refresh) to play again.");
+    } else if (!started){
+      overlay("Top-down Roguelite", "Press any movement key to begin. Shoot with click/touch.");
+    } else if (choosingUpgrade){
+      drawUpgradeOverlay();
+    }
+  }
+
+  function overlay(title, subtitle){
+    ctx.fillStyle = "rgba(0,0,0,0.55)";
+    ctx.fillRect(0,0,W,H);
+    ctx.fillStyle = "#e9ecf1";
+    ctx.font = "800 44px system-ui, Arial";
+    ctx.fillText(title, 40, 120);
+    ctx.font = "16px system-ui, Arial";
+    ctx.fillStyle = "rgba(233,236,241,0.85)";
+    ctx.fillText(subtitle, 42, 150);
+  }
+
+  function drawUpgradeOverlay(){
+    ctx.fillStyle = "rgba(0,0,0,0.62)";
+    ctx.fillRect(0,0,W,H);
+
+    ctx.fillStyle = "#e9ecf1";
+    ctx.font = "800 34px system-ui, Arial";
+    ctx.fillText("Level Up! Choose an upgrade", 40, 72);
+
+    const cards = [
+      {x: 60,  y: 120, w: 260, h: 160, idx:0},
+      {x: 350, y: 120, w: 260, h: 160, idx:1},
+      {x: 640, y: 120, w: 260, h: 160, idx:2},
+    ];
+
+    for (const c of cards){
+      const u = upgradeChoices[c.idx];
+      ctx.fillStyle = "rgba(16,22,42,0.92)";
+      ctx.strokeStyle = "rgba(120,170,255,0.35)";
+      roundRect(c.x,c.y,c.w,c.h,14,true,true);
+
+      ctx.fillStyle = "#e9ecf1";
+      ctx.font = "800 20px system-ui, Arial";
+      ctx.fillText(`${c.idx+1}) ${u.name}`, c.x+16, c.y+40);
+
+      ctx.fillStyle = "rgba(233,236,241,0.8)";
+      ctx.font = "14px system-ui, Arial";
+      ctx.fillText(u.desc, c.x+16, c.y+70);
+
+      ctx.fillStyle = "rgba(233,236,241,0.65)";
+      ctx.font = "12px system-ui, Arial";
+      ctx.fillText("Press 1/2/3 to pick", c.x+16, c.y+c.h-18);
+    }
+  }
+
+  // Upgrade choice keys
+  window.addEventListener("keydown", (e)=>{
+    if (!choosingUpgrade) return;
+    const k = e.key;
+    if (k === "1") chooseUpgrade(0);
+    if (k === "2") chooseUpgrade(1);
+    if (k === "3") chooseUpgrade(2);
+  });
+
+  // click upgrades
+  canvas.addEventListener("mousedown", (e)=>{
+    if (!choosingUpgrade) return;
+    const r = canvas.getBoundingClientRect();
+    const mx = (e.clientX - r.left) * (W / r.width);
+    const my = (e.clientY - r.top) * (H / r.height);
+    const boxes = [
+      {x:60,y:120,w:260,h:160, idx:0},
+      {x:350,y:120,w:260,h:160, idx:1},
+      {x:640,y:120,w:260,h:160, idx:2},
+    ];
+    for (const b of boxes){
+      if (mx>=b.x && mx<=b.x+b.w && my>=b.y && my<=b.y+b.h) chooseUpgrade(b.idx);
+    }
+  });
+
+  // ===== Game loop =====
+  let last = 0;
+  let started = false;
+  let gameOver = false;
+
+  function resetAll(){
+    genDungeon();
+    bullets = [];
+    enemies = [];
+    particles = [];
+    score = 0;
+    running = true;
+    started = false;
+    gameOver = false;
+    choosingUpgrade = false;
+    upgradeChoices = pickUpgrades();
+
+    // reset player stats
+    Object.assign(player, {
+      vx:0, vy:0,
+      speed:220,
+      hp:100, hpMax:100,
+      invuln:0,
+      dashCD:0,
+      dashTime:0,
+      level:1,
+      xp:0,
+      xpNeed:45,
+      dmg:14,
+      fireRate:7.5,
+      bulletSpeed:520,
+      pierce:0,
+      lifesteal:0
+    });
+
+    spawnPlayerAtRoom(0);
+    discovered.add("room:0");
+    ensureRoomEnemies(0);
+    updateCamera();
+  }
+
+  function doMovement(dt){
+    let dx=0, dy=0;
+    if (keys.has("a") || keys.has("arrowleft")) dx -= 1;
+    if (keys.has("d") || keys.has("arrowright")) dx += 1;
+    if (keys.has("w") || keys.has("arrowup")) dy -= 1;
+    if (keys.has("s") || keys.has("arrowdown")) dy += 1;
+
+    if ((dx||dy) && !started) { started = true; running = true; }
+
+    // dash
+    player.dashCDMax = player.dashCDMax ?? 1.15;
+    if (player.dashCD > 0) player.dashCD -= dt;
+    if (player.dashTime > 0) player.dashTime -= dt;
+
+    const wantsDash = keys.has("shift");
+    if (wantsDash && player.dashCD <= 0 && (dx||dy)){
+      player.dashTime = 0.14;
+      player.dashCD = player.dashCDMax;
+      player.invuln = Math.max(player.invuln, 0.15);
+    }
+
+    const len = Math.hypot(dx,dy) || 1;
+    dx /= len; dy /= len;
+
+    const spd = player.speed * (player.dashTime>0 ? 2.6 : 1);
+    player.vx = dx * spd;
+    player.vy = dy * spd;
+
+    // integrate with simple wall push-out
+    player.x += player.vx * dt;
+    player.y += player.vy * dt;
+    pushOutOfWalls(player);
+
+    // room transitions: spawn enemies, mark discovered
+    const ridx = roomIndexAt(player.x, player.y);
+    if (ridx >= 0){
+      discovered.add("room:"+ridx);
+      ensureRoomEnemies(ridx);
+      currentRoomIdx = ridx;
+    }
+  }
+
+  function updateBullets(dt){
+    for (let i=bullets.length-1; i>=0; i--){
+      const b = bullets[i];
+      b.x += b.vx * dt;
+      b.y += b.vy * dt;
+      b.life -= dt;
+
+      // wall hit
+      if (isWallAt(b.x, b.y)){
+        bullets.splice(i,1);
+        continue;
+      }
+
+      // enemy hit
+      for (let j=enemies.length-1; j>=0; j--){
+        const e = enemies[j];
+        if (dist2(b.x,b.y,e.x,e.y) <= (b.r+e.r)*(b.r+e.r)){
+          e.hp -= b.dmg;
+          if (player.lifesteal > 0) healPlayer(b.dmg * player.lifesteal);
+
+          // particles
+          for (let k=0;k<6;k++){
+            particles.push({x:e.x,y:e.y,vx:rand(-80,80),vy:rand(-80,80),life:rand(0.15,0.35)});
+          }
+
+          if (e.hp <= 0){
+            enemies.splice(j,1);
+            score += 10;
+            addXP(10);
+          }
+
+          if (b.pierce > 0){
+            b.pierce -= 1;
+          } else {
+            bullets.splice(i,1);
+          }
+          break;
+        }
+      }
+
+      if (b.life <= 0 && bullets[i] === b) bullets.splice(i,1);
+    }
+  }
+
+  function updateEnemies(dt){
+    for (const e of enemies){
+      e.touchCD = Math.max(0, e.touchCD - dt);
+      const dx = player.x - e.x;
+      const dy = player.y - e.y;
+      const len = Math.hypot(dx,dy) || 1;
+      const ux = dx/len, uy = dy/len;
+
+      // chase player
+      e.x += ux * e.spd * dt;
+      e.y += uy * e.spd * dt;
+      pushOutOfWalls(e);
+
+      // contact damage
+      if (dist2(e.x,e.y, player.x,player.y) <= (e.r+player.r)*(e.r+player.r)){
+        if (e.touchCD <= 0){
+          e.touchCD = 0.45;
+          damagePlayer(e.dmg);
+        }
+      }
+    }
+  }
+
+  function updateParticles(dt){
+    for (let i=particles.length-1;i>=0;i--){
+      const p = particles[i];
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+      p.life -= dt;
+      if (p.life <= 0) particles.splice(i,1);
+    }
+  }
+
+  function update(dt){
+    if (player.invuln > 0) player.invuln -= dt;
+    doMovement(dt);
+    shoot(dt);
+    updateBullets(dt);
+    updateEnemies(dt);
+    updateParticles(dt);
+    updateCamera();
+  }
+
+  function draw(){
+    ctx.clearRect(0,0,W,H);
+    drawDungeon();
+
+    // bullets
+    ctx.fillStyle = "rgba(120,170,255,0.95)";
+    for (const b of bullets){
+      ctx.beginPath();
+      ctx.arc(b.x+cam.x, b.y+cam.y, b.r, 0, Math.PI*2);
+      ctx.fill();
+    }
+
+    // particles
+    ctx.fillStyle = "rgba(255,255,255,0.18)";
+    for (const p of particles){
+      ctx.globalAlpha = clamp(p.life*3, 0, 1);
+      ctx.fillRect(p.x+cam.x, p.y+cam.y, 2, 2);
+    }
+    ctx.globalAlpha = 1;
+
+    // enemies
+    for (const e of enemies){
+      drawEntityCircle(e.x,e.y,e.r, "rgba(255,110,110,0.9)", "rgba(0,0,0,0.35)");
+      // hp
+      const w = e.r*2;
+      const x = e.x+cam.x - w/2;
+      const y = e.y+cam.y - e.r - 10;
+      ctx.fillStyle = "rgba(0,0,0,0.35)";
+      ctx.fillRect(x,y,w,4);
+      ctx.fillStyle = "rgba(255,220,220,0.9)";
+      ctx.fillRect(x,y,w*clamp(e.hp/80,0,1),4);
+    }
+
+    // player
+    const glow = (player.invuln>0) ? "rgba(170,255,210,0.95)" : "rgba(190,210,255,0.95)";
+    drawEntityCircle(player.x,player.y,player.r, glow, "rgba(0,0,0,0.35)");
+
+    // crosshair
+    ctx.strokeStyle = "rgba(233,236,241,0.35)";
+    ctx.beginPath();
+    ctx.arc(pointer.x, pointer.y, 10, 0, Math.PI*2);
+    ctx.stroke();
+
+    drawUI();
+
+    // stats line
+    const hp = `${Math.round(player.hp)}/${player.hpMax}`;
+    statsEl.textContent =
+      `HP ${hp} • Lv ${player.level} • XP ${Math.floor(player.xp)}/${player.xpNeed} • Enemies ${enemies.length} • Score ${score}`;
+  }
+
+  function loop(t){
+    const dt = Math.min(0.033, (t - last) / 1000 || 0);
+    last = t;
+
+    if (running && !choosingUpgrade && !gameOver) update(dt);
+    draw();
+    requestAnimationFrame(loop);
+  }
+
+  restartBtn.addEventListener("click", resetAll);
+
+  // Start
+  resetAll();
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
